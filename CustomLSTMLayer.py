@@ -609,9 +609,10 @@ class LNLSTMLayer(MergeLayer):
 
         return hid_out
 
-    def get_cell_for(self, inputs, **kwargs):
+    def get_hid_cell_for(self, inputs, **kwargs):
         """
-        Compute this layer's final hidden cell given a symbolic input variable
+        Compute this layer's final hidden output and cell given a symbolic
+        input variable
 
         Parameters
         ----------
@@ -637,8 +638,26 @@ class LNLSTMLayer(MergeLayer):
 
         Returns
         -------
+        hid_out  : theano.TensorType
+            Symbolic output variable.
         cell_out : theano.TensorType
             Symbolic output variable.
         """
-        cell_out, _ = self.__lstm_fun__(inputs, **kwargs)
-        return cell_out[-1]
+        cell_out, hid_out = self.__lstm_fun__(inputs, **kwargs)
+
+        # When it is requested that we only return the final sequence step,
+        # we need to slice it out immediately after scan is applied
+        if self.only_return_final:
+            hid_out = hid_out[-1]
+            cell_out = cell_out[-1]
+        else:
+            # dimshuffle back to (n_batch, n_time_steps, n_features))
+            hid_out = hid_out.dimshuffle(1, 0, 2)
+            cell_out = cell_out.dimshuffle(1, 0, 2)
+
+            # if scan is backward reverse the output
+            if self.backwards:
+                hid_out = hid_out[:, ::-1]
+                cell_out = cell_out[:, ::-1]
+
+        return hid_out, cell_out
