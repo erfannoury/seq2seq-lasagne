@@ -223,14 +223,12 @@ class LNLSTMLayer(MergeLayer):
                                    name="b_{}".format(gate_name),
                                    regularizable=False),
                     self.add_param(self.alpha_init, (num_units,),
-                                   name="alpha_in_to_{}".format(gate_name),
-                                   regularizable=False),
+                                   name="alpha_in_to_{}".format(gate_name)),
                     self.add_param(self.beta_init, (num_units,),
                                    name="beta_in_to_{}".format(gate_name),
                                    regularizable=False),
                     self.add_param(self.alpha_init, (num_units,),
-                                   name="alpha_hid_to_{}".format(gate_name),
-                                   regularizable=False),
+                                   name="alpha_hid_to_{}".format(gate_name)),
                     self.add_param(self.beta_init, (num_units,),
                                    name="beta_hid_to_{}".format(gate_name),
                                    regularizable=False),
@@ -267,7 +265,7 @@ class LNLSTMLayer(MergeLayer):
 
             self.alpha_cell_to_ingate = self.add_param(
                 self.alpha_init, (num_units, ),
-                name="alpha_cell_to_ingate", regularizable=False)
+                name="alpha_cell_to_ingate")
 
             self.beta_cell_to_ingate = self.add_param(
                 self.beta_init, (num_units, ),
@@ -278,7 +276,7 @@ class LNLSTMLayer(MergeLayer):
 
             self.alpha_cell_to_forgetgate = self.add_param(
                 self.alpha_init, (num_units, ),
-                name="alpha_cell_to_forgetgate", regularizable=False)
+                name="alpha_cell_to_forgetgate")
 
             self.beta_cell_to_forgetgate = self.add_param(
                 self.beta_init, (num_units, ),
@@ -289,7 +287,7 @@ class LNLSTMLayer(MergeLayer):
 
             self.alpha_cell_to_outgate = self.add_param(
                 self.alpha_init, (num_units, ),
-                name="alpha_cell_to_outgate", regularizable=False)
+                name="alpha_cell_to_outgate")
 
             self.beta_cell_to_outgate = self.add_param(
                 self.beta_init, (num_units, ),
@@ -309,6 +307,14 @@ class LNLSTMLayer(MergeLayer):
             self.hid_init = self.add_param(
                 hid_init, (1, self.num_units), name="hid_init",
                 trainable=learn_init, regularizable=False)
+
+        # parameters for Layer Normalization of the cell gate
+        self.alpha_cell_gate = self.add_param(
+            self.alpha_init, (num_units,),
+            name="alpha_cell_gate")
+        self.beta_cell_gate = self.add_param(
+            self.beta_init, (num_units,),
+            name="beta_cell_gate", regularizable=False)
 
     def get_output_shape_for(self, input_shapes):
         # The shape of the input to this layer will be the first element
@@ -382,7 +388,7 @@ class LNLSTMLayer(MergeLayer):
 
         # Layer Normalization
         def ln(z, alpha, beta):
-            _eps = 1e-5
+            _eps = 1e-7
             output = (z - z.mean(-1, keepdims=True)) / T.sqrt((z.var(-1, keepdims=True) + _eps))
             output = alpha * output + beta
             return output
@@ -485,7 +491,9 @@ class LNLSTMLayer(MergeLayer):
             outgate = self.nonlinearity_outgate(outgate)
 
             # Compute new hidden unit activation
-            hid = outgate*self.nonlinearity(cell)
+            hid = outgate*self.nonlinearity(ln(cell,
+                            T.dot(ones, T.shape_padleft(self.alpha_cell_gate)),
+                            self.beta_cell_gate))
             return [cell, hid]
 
         def step_masked(input_n, mask_n, cell_previous, hid_previous, *args):
@@ -519,7 +527,8 @@ class LNLSTMLayer(MergeLayer):
             hid_init = T.dot(ones, self.hid_init)
 
         # The hidden-to-hidden weight matrix is always used in step
-        non_seqs = [W_hid_stacked, alpha_hid_stacked, beta_hid_stacked]
+        non_seqs = [W_hid_stacked, alpha_hid_stacked, beta_hid_stacked,
+                    self.alpha_cell_gate, self.beta_cell_gate]
         # The "peephole" weight matrices are only used when self.peepholes=True
         if self.peepholes:
             non_seqs += [self.W_cell_to_ingate,
