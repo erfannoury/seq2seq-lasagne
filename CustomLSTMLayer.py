@@ -44,21 +44,18 @@ class LNLSTMLayer(MergeLayer):
 
         i_t &= \sigma_i(LN(x_t W_{xi}; \alpha_{xi}, \beta_{xi})
                + LN(h_{t-1} W_{hi}; \alpha_{hi}, \beta_{hi})
-               + LN(w_{ci} \odot c_{t-1}; \alpha_{ci}, \beta_{ci})
-               + b_i)\\
+               + w_{ci} \odot c_{t-1} + b_i)\\
         f_t &= \sigma_f(LN(x_t W_{xf}; \alpha_{xf}, \beta_{xf})
                + LN(h_{t-1} W_{hf}; \alpha_{hf}, \beta_{hf})
-               + LN(w_{cf} \odot c_{t-1}; \alpha_{cf}, \beta_{cf})
-               + b_f)\\
+               + w_{cf} \odot c_{t-1} + b_f)\\
         c_t &= f_t \odot c_{t - 1}
                + i_t \odot \sigma_c(LN(x_t W_{xc}; \alpha_{xc}, \beta_{xc})
-               + LN(h_{t-1} W_{hc}; \alpha_{hc}, \beta_{hc})
+               + h_{t-1} W_{hc}; \alpha_{hc}, \beta_{hc})
                + b_c)\\
         o_t &= \sigma_o(LN(x_t W_{xo}; \alpha_{xo}, \beta_{xo})
                + LN(h_{t-1} W_{ho}; \alpha_{ho}, \beta_{ho})
-               + LN(w_{co} \odot c_t; \alpha_{co}, \beta_{co})
-               + b_o)\\
-        h_t &= o_t \odot \sigma_h(c_t)
+               + w_{co} \odot c_t + b_o)\\
+        h_t &= o_t \odot \sigma_h(LN(c_t; \alpha_c, \beta_c))
 
     where
     .. math ::
@@ -196,9 +193,7 @@ class LNLSTMLayer(MergeLayer):
         self.only_return_final = only_return_final
         self.alpha_init = alpha_init
         self.beta_init = beta_init
-
-        # new
-        self.cell_out_var = None
+        self._eps = 1e-7
 
         if unroll_scan and gradient_steps != -1:
             raise ValueError(
@@ -264,35 +259,11 @@ class LNLSTMLayer(MergeLayer):
             self.W_cell_to_ingate = self.add_param(
                 ingate.W_cell, (num_units, ), name="W_cell_to_ingate")
 
-            self.alpha_cell_to_ingate = self.add_param(
-                self.alpha_init, (num_units, ),
-                name="alpha_cell_to_ingate")
-
-            self.beta_cell_to_ingate = self.add_param(
-                self.beta_init, (num_units, ),
-                name="beta_cell_to_ingate", regularizable=False)
-
             self.W_cell_to_forgetgate = self.add_param(
                 forgetgate.W_cell, (num_units, ), name="W_cell_to_forgetgate")
 
-            self.alpha_cell_to_forgetgate = self.add_param(
-                self.alpha_init, (num_units, ),
-                name="alpha_cell_to_forgetgate")
-
-            self.beta_cell_to_forgetgate = self.add_param(
-                self.beta_init, (num_units, ),
-                name="beta_cell_to_forgetgate", regularizable=False)
-
             self.W_cell_to_outgate = self.add_param(
                 outgate.W_cell, (num_units, ), name="W_cell_to_outgate")
-
-            self.alpha_cell_to_outgate = self.add_param(
-                self.alpha_init, (num_units, ),
-                name="alpha_cell_to_outgate")
-
-            self.beta_cell_to_outgate = self.add_param(
-                self.beta_init, (num_units, ),
-                name="beta_cell_to_outgate", regularizable=False)
 
         # Setup initial values for the cell and the hidden units
         if isinstance(cell_init, Layer):
@@ -311,10 +282,10 @@ class LNLSTMLayer(MergeLayer):
 
         # parameters for Layer Normalization of the cell gate
         self.alpha_cell_gate = self.add_param(
-            self.alpha_init, (num_units,),
+            self.alpha_init, (num_units, ),
             name="alpha_cell_gate")
         self.beta_cell_gate = self.add_param(
-            self.beta_init, (num_units,),
+            self.beta_init, (num_units, ),
             name="beta_cell_gate", regularizable=False)
 
     def get_output_shape_for(self, input_shapes):
@@ -328,6 +299,13 @@ class LNLSTMLayer(MergeLayer):
         # Otherwise, the shape will be (n_batch, n_steps, num_units)
         else:
             return input_shape[0], input_shape[1], self.num_units
+
+    # Layer Normalization
+    def __ln__(self, z, alpha, beta):
+        _eps = 1e-7
+        output = (z - z.mean(-1, keepdims=True)) / T.sqrt(z.var(-1, keepdims=True) + _eps)
+        output = alpha * output + beta
+        return output
 
     def __lstm_fun__(self, inputs, **kwargs):
         """
@@ -365,6 +343,7 @@ class LNLSTMLayer(MergeLayer):
         """
         # Retrieve the layer input
         input = inputs[0]
+
         # Retrieve the mask when it is supplied
         mask = None
         hid_init = None
@@ -384,31 +363,12 @@ class LNLSTMLayer(MergeLayer):
         # (n_time_steps, n_batch, n_features)
         input = input.dimshuffle(1, 0, 2)
         seq_len, num_batch, _ = input.shape
-        ones = T.ones((num_batch, 1))
-        big_ones = T.ones((seq_len, num_batch, 1))
-
-        # Layer Normalization
-        def ln(z, alpha, beta):
-            _eps = 1e-7
-            output = (z - z.mean(-1, keepdims=True)) / T.sqrt((z.var(-1, keepdims=True) + _eps))
-            output = alpha * output + beta
-            return output
 
         # Stack input weight matrices into a (num_inputs, 4*num_units)
         # matrix, which speeds up computation
         W_in_stacked = T.concatenate(
             [self.W_in_to_ingate, self.W_in_to_forgetgate,
              self.W_in_to_cell, self.W_in_to_outgate], axis=1)
-
-        # Same for hidden weight matrices
-        W_hid_stacked = T.concatenate(
-            [self.W_hid_to_ingate, self.W_hid_to_forgetgate,
-             self.W_hid_to_cell, self.W_hid_to_outgate], axis=1)
-
-        # Stack biases into a (4*num_units) vector
-        b_stacked = T.concatenate(
-            [self.b_ingate, self.b_forgetgate,
-             self.b_cell, self.b_outgate], axis=0)
 
         # Stack alphas for input into a (4*num_units) vector
         alpha_in_stacked = T.concatenate(
@@ -420,6 +380,11 @@ class LNLSTMLayer(MergeLayer):
             [self.beta_in_to_ingate, self.beta_in_to_forgetgate,
              self.beta_in_to_cell, self.beta_in_to_outgate], axis=0)
 
+        # Same for hidden weight matrices
+        W_hid_stacked = T.concatenate(
+            [self.W_hid_to_ingate, self.W_hid_to_forgetgate,
+             self.W_hid_to_cell, self.W_hid_to_outgate], axis=1)
+
         # Stack alphas for hidden into a (4*num_units) vector
         alpha_hid_stacked = T.concatenate(
             [self.alpha_hid_to_ingate, self.alpha_hid_to_forgetgate,
@@ -430,16 +395,25 @@ class LNLSTMLayer(MergeLayer):
             [self.beta_hid_to_ingate, self.beta_hid_to_forgetgate,
              self.beta_hid_to_cell, self.beta_hid_to_outgate], axis=0)
 
+        # Stack biases into a (4*num_units) vector
+        b_stacked = T.concatenate(
+            [self.b_ingate, self.b_forgetgate,
+             self.b_cell, self.b_outgate], axis=0)
+
         if self.precompute_input:
             # Because the input is given for all time steps, we can
             # precompute_input the inputs dot weight matrices before scanning.
             # W_in_stacked is (n_features, 4*num_units). input is then
             # (n_time_steps, n_batch, 4*num_units).
-            input = ln(T.dot(input, W_in_stacked),
-                       T.dot(big_ones, T.shape_padleft(alpha_in_stacked, 1)),
-                       beta_in_stacked) + b_stacked
+            big_ones = T.ones((seq_len, num_batch, 1))
+            input = T.dot(input, W_in_stacked)
+            input = self.__ln__(input, 
+                                T.dot(big_ones, alpha_in_stacked.dimshuffle('x', 0)),
+                                beta_in_stacked)
+            input = input + b_stacked
 
-        # At each call to scan, input_n will be (n_time_steps, 4*num_units).
+        ones = T.ones((num_batch, 1))
+        # When theano.scan calls step, input_n will be (n_batch, 4*num_units).
         # We define a slicing function that extract the input to each LSTM gate
         def slice_w(x, n):
             return x[:, n*self.num_units:(n+1)*self.num_units]
@@ -448,14 +422,18 @@ class LNLSTMLayer(MergeLayer):
         # input_n is the n'th vector of the input
         def step(input_n, cell_previous, hid_previous, *args):
             if not self.precompute_input:
-                input_n = ln(T.dot(input_n, W_in_stacked),
-                             T.dot(ones, T.shape_padleft(alpha_in_stacked, 1)),
-                             beta_in_stacked) + b_stacked
+                input_n = T.dot(input_n, W_in_stacked)
+                input_n = self.__ln__(input_n, 
+                                      T.dot(ones, alpha_in_stacked.dimshuffle('x', 0)),
+                                      beta_in_stacked)
+                input_n = input_n + b_stacked
 
             # Calculate gates pre-activations and slice
-            gates = input_n + ln(T.dot(hid_previous, W_hid_stacked),
-                                 T.dot(ones, T.shape_padleft(alpha_hid_stacked, 1)),
-                                 beta_hid_stacked)
+            gates = T.dot(hid_previous, W_hid_stacked)
+            gates = self.__ln__(gates, 
+                                T.dot(ones, alpha_hid_stacked.dimshuffle('x', 0)),
+                                beta_hid_stacked)
+            gates = input_n + gates
 
             # Clip gradients
             if self.grad_clipping:
@@ -470,12 +448,8 @@ class LNLSTMLayer(MergeLayer):
 
             if self.peepholes:
                 # Compute peephole connections
-                ingate += ln(cell_previous*self.W_cell_to_ingate,
-                             self.alpha_cell_to_ingate,
-                             self.beta_cell_to_ingate)
-                forgetgate += ln(cell_previous*self.W_cell_to_forgetgate,
-                                 self.alpha_cell_to_forgetgate,
-                                 self.beta_cell_to_forgetgate)
+                ingate += cell_previous*self.W_cell_to_ingate
+                forgetgate += cell_previous*self.W_cell_to_forgetgate
 
             # Apply nonlinearities
             ingate = self.nonlinearity_ingate(ingate)
@@ -484,17 +458,16 @@ class LNLSTMLayer(MergeLayer):
 
             # Compute new cell value
             cell = forgetgate*cell_previous + ingate*cell_input
+            cell = self.__ln__(cell, 
+                               T.dot(ones, self.alpha_cell_gate.dimshuffle('x', 0)),
+                               self.beta_cell_gate)
 
             if self.peepholes:
-                outgate += ln(cell*self.W_cell_to_outgate,
-                              self.alpha_cell_to_outgate,
-                              self.beta_cell_to_outgate)
+                outgate += cell*self.W_cell_to_outgate
             outgate = self.nonlinearity_outgate(outgate)
 
             # Compute new hidden unit activation
-            hid = outgate*self.nonlinearity(ln(cell,
-                            T.dot(ones, T.shape_padleft(self.alpha_cell_gate)),
-                            self.beta_cell_gate))
+            hid = outgate*self.nonlinearity(cell)
             return [cell, hid]
 
         def step_masked(input_n, mask_n, cell_previous, hid_previous, *args):
@@ -518,7 +491,6 @@ class LNLSTMLayer(MergeLayer):
             sequences = input
             step_fun = step
 
-        # ones = T.ones((num_batch, 1))
         if not isinstance(self.cell_init, Layer):
             # Dot against a 1s vector to repeat to shape (num_batch, num_units)
             cell_init = T.dot(ones, self.cell_init)
@@ -534,13 +506,7 @@ class LNLSTMLayer(MergeLayer):
         if self.peepholes:
             non_seqs += [self.W_cell_to_ingate,
                          self.W_cell_to_forgetgate,
-                         self.W_cell_to_outgate,
-                         self.alpha_cell_to_ingate,
-                         self.beta_cell_to_ingate,
-                         self.alpha_cell_to_forgetgate,
-                         self.beta_cell_to_forgetgate,
-                         self.alpha_cell_to_outgate,
-                         self.beta_cell_to_outgate]
+                         self.W_cell_to_outgate]
 
         # When we aren't precomputing the input outside of scan, we need to
         # provide the input weights and biases to the step function
@@ -569,7 +535,7 @@ class LNLSTMLayer(MergeLayer):
                 go_backwards=self.backwards,
                 truncate_gradient=self.gradient_steps,
                 non_sequences=non_seqs,
-                strict=True)[0]
+                strict=False)[0]
 
         return cell_out, hid_out
 
@@ -605,6 +571,7 @@ class LNLSTMLayer(MergeLayer):
             Symbolic output variable.
         """
         _, hid_out = self.__lstm_fun__(inputs, **kwargs)
+
         # When it is requested that we only return the final sequence step,
         # we need to slice it out immediately after scan is applied
         if self.only_return_final:
