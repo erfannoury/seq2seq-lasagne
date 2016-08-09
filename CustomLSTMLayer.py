@@ -281,12 +281,12 @@ class LNLSTMLayer(MergeLayer):
                 trainable=learn_init, regularizable=False)
 
         # parameters for Layer Normalization of the cell gate
-        self.alpha_cell_gate = self.add_param(
-            self.alpha_init, (num_units, ),
-            name="alpha_cell_gate")
-        self.beta_cell_gate = self.add_param(
-            self.beta_init, (num_units, ),
-            name="beta_cell_gate", regularizable=False)
+        # self.alpha_cell_gate = self.add_param(
+            # self.alpha_init, (num_units, ),
+            # name="alpha_cell_gate")
+        # self.beta_cell_gate = self.add_param(
+            # self.beta_init, (num_units, ),
+            # name="beta_cell_gate", regularizable=False)
 
     def get_output_shape_for(self, input_shapes):
         # The shape of the input to this layer will be the first element
@@ -458,9 +458,9 @@ class LNLSTMLayer(MergeLayer):
 
             # Compute new cell value
             cell = forgetgate*cell_previous + ingate*cell_input
-            cell = self.__ln__(cell, 
-                               T.dot(ones, self.alpha_cell_gate.dimshuffle('x', 0)),
-                               self.beta_cell_gate)
+            # cell = self.__ln__(cell, 
+                            #    T.dot(ones, self.alpha_cell_gate.dimshuffle('x', 0)),
+                            #    self.beta_cell_gate)
 
             if self.peepholes:
                 outgate += cell*self.W_cell_to_outgate
