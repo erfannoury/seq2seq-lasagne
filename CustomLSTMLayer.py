@@ -500,8 +500,8 @@ class LNLSTMLayer(MergeLayer):
             hid_init = T.dot(ones, self.hid_init)
 
         # The hidden-to-hidden weight matrix is always used in step
-        non_seqs = [W_hid_stacked, alpha_hid_stacked, beta_hid_stacked,
-                    self.alpha_cell_gate, self.beta_cell_gate]
+        non_seqs = [W_hid_stacked, alpha_hid_stacked, beta_hid_stacked]
+                    # self.alpha_cell_gate, self.beta_cell_gate]
         # The "peephole" weight matrices are only used when self.peepholes=True
         if self.peepholes:
             non_seqs += [self.W_cell_to_ingate,
