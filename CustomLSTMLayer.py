@@ -27,7 +27,7 @@ class LNLSTMLayer(MergeLayer):
     peepholes=True, gradient_steps=-1, grad_clipping=0, unroll_scan=False,
     precompute_input=True, mask_input=None, only_return_final=False,
     alpha_init=lasagne.init.Constant(1.0), beta_init=lasagne.init.Constant(0.0),
-    **kwargs)
+    normalize_cell=False,**kwargs)
 
     A long short-term memory (LSTM) layer that can also be used as the encoder
     in a sequence to sequence architecture.
@@ -125,6 +125,13 @@ class LNLSTMLayer(MergeLayer):
         Initializer for alpha vector for Layer-Normalization (:math:`\alpha_0`)
     beta_init : callable, np.ndarray, theano.shared or :class:`Layer`
         Initializer for beta vector for Layer-Normalization (:math:`h_0`)
+    normalize_cell: boolean
+        Whether to normalize the LSTM cell or not. Experimentally it has been
+        shown that normalizing the cell causes the output to become NaN.
+        However, Jamie Ryan Kiros suggested that
+        (https://twitter.com/jrkiros/status/763826390231764992) using smaller
+        gain init could solve this problem (0.2 instead of 1.0).
+
 
     References
     ----------
@@ -152,6 +159,7 @@ class LNLSTMLayer(MergeLayer):
                  only_return_final=False,
                  alpha_init=init.Constant(1.0),
                  beta_init=init.Constant(0.0),
+                 normalize_cell=False,
                  **kwargs):
 
         # This layer inherits from a MergeLayer, because it can have four
@@ -193,7 +201,8 @@ class LNLSTMLayer(MergeLayer):
         self.only_return_final = only_return_final
         self.alpha_init = alpha_init
         self.beta_init = beta_init
-        self._eps = 1e-7
+        self.normalize_cell = normalize_cell
+        self._eps = 1e-5
 
         if unroll_scan and gradient_steps != -1:
             raise ValueError(
@@ -281,12 +290,13 @@ class LNLSTMLayer(MergeLayer):
                 trainable=learn_init, regularizable=False)
 
         # parameters for Layer Normalization of the cell gate
-        # self.alpha_cell_gate = self.add_param(
-            # self.alpha_init, (num_units, ),
-            # name="alpha_cell_gate")
-        # self.beta_cell_gate = self.add_param(
-            # self.beta_init, (num_units, ),
-            # name="beta_cell_gate", regularizable=False)
+        if self.normalize_cell:
+            self.alpha_cell_gate = self.add_param(
+                self.alpha_init, (num_units, ),
+                name="alpha_cell_gate")
+            self.beta_cell_gate = self.add_param(
+                self.beta_init, (num_units, ),
+                name="beta_cell_gate", regularizable=False)
 
     def get_output_shape_for(self, input_shapes):
         # The shape of the input to this layer will be the first element
@@ -302,8 +312,7 @@ class LNLSTMLayer(MergeLayer):
 
     # Layer Normalization
     def __ln__(self, z, alpha, beta):
-        _eps = 1e-7
-        output = (z - z.mean(-1, keepdims=True)) / T.sqrt(z.var(-1, keepdims=True) + _eps)
+        output = (z - z.mean(-1, keepdims=True)) / T.sqrt(z.var(-1, keepdims=True) + self._eps)
         output = alpha * output + beta
         return output
 
@@ -407,7 +416,7 @@ class LNLSTMLayer(MergeLayer):
             # (n_time_steps, n_batch, 4*num_units).
             big_ones = T.ones((seq_len, num_batch, 1))
             input = T.dot(input, W_in_stacked)
-            input = self.__ln__(input, 
+            input = self.__ln__(input,
                                 T.dot(big_ones, alpha_in_stacked.dimshuffle('x', 0)),
                                 beta_in_stacked)
             input = input + b_stacked
@@ -423,14 +432,14 @@ class LNLSTMLayer(MergeLayer):
         def step(input_n, cell_previous, hid_previous, *args):
             if not self.precompute_input:
                 input_n = T.dot(input_n, W_in_stacked)
-                input_n = self.__ln__(input_n, 
+                input_n = self.__ln__(input_n,
                                       T.dot(ones, alpha_in_stacked.dimshuffle('x', 0)),
                                       beta_in_stacked)
                 input_n = input_n + b_stacked
 
             # Calculate gates pre-activations and slice
             gates = T.dot(hid_previous, W_hid_stacked)
-            gates = self.__ln__(gates, 
+            gates = self.__ln__(gates,
                                 T.dot(ones, alpha_hid_stacked.dimshuffle('x', 0)),
                                 beta_hid_stacked)
             gates = input_n + gates
@@ -458,9 +467,10 @@ class LNLSTMLayer(MergeLayer):
 
             # Compute new cell value
             cell = forgetgate*cell_previous + ingate*cell_input
-            # cell = self.__ln__(cell, 
-                            #    T.dot(ones, self.alpha_cell_gate.dimshuffle('x', 0)),
-                            #    self.beta_cell_gate)
+            if self.normalize_cell:
+                cell = self.__ln__(cell,
+                                   T.dot(ones, self.alpha_cell_gate.dimshuffle('x', 0)),
+                                   self.beta_cell_gate)
 
             if self.peepholes:
                 outgate += cell*self.W_cell_to_outgate
